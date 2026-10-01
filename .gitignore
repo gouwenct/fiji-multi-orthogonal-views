@@ -1,0 +1,8 @@
+*.zip
+*.tar
+*.7z
+release/
+release-assets/
+dist/
+*.original
+*.tmp
