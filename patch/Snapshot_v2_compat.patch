@@ -1,0 +1,149 @@
+--- a/scripts/Plugins/Snapshot_.groovy
++++ b/scripts/Plugins/Snapshot_.groovy
+@@ -92,11 +92,74 @@
+             }
+             Map manifest = (Map) new JsonSlurper().parseText(
+                     new String(zip.getInputStream(entry).bytes, StandardCharsets.UTF_8))
++            manifest = normalizeManifest(manifest)
+             validateManifest(manifest)
+             manifest
+         } finally {
+             zip.close()
+         }
++    }
++
++    static boolean isSnapshot(Path archive) {
++        new ZipFile(archive.toFile(), StandardCharsets.UTF_8).withCloseable { zip ->
++            def entry = zip.getEntry(MANIFEST_ENTRY)
++            if (entry == null || entry.directory) return false
++            zip.getInputStream(entry).withCloseable { input ->
++                def header = new JsonSlurper().parseText(new String(input.bytes, StandardCharsets.UTF_8))
++                header instanceof Map && header.format == FORMAT
++            }
++        }
++    }
++
++    /** Adapt Snapshot2 formatVersion 2 entries to this script's v1 restore model. */
++    private static Map normalizeManifest(Map manifest) {
++        if (manifest?.format != FORMAT || !manifest.containsKey('formatVersion'))
++            return manifest
++        if (manifest.formatVersion != 2)
++            throw new IllegalArgumentException("Unsupported snapshot formatVersion: ${manifest.formatVersion}")
++        manifest.remove('formatVersion')
++        manifest.version = VERSION
++        manifest.images = ((List<Map>) (manifest.images ?: [])).collect { Map image ->
++            Map position = (Map) (image.position ?: [:])
++            Map displayState = (Map) (image.displayState ?: [:])
++            List minimums = (List) (displayState.channelMinimums ?: [])
++            List maximums = (List) (displayState.channelMaximums ?: [])
++            List<Map> ranges = []
++            int rangeCount = Math.min(minimums.size(), maximums.size())
++            for (int channel = 0; channel < rangeCount; channel++)
++                ranges.add([min: minimums[channel], max: maximums[channel]])
++            Map sourceMetadata = (Map) (image.sourceMetadata ?: [:])
++            Map canvas = image.magnification != null ?
++                    [magnification: image.magnification, sourceRect: image.sourceRectangle] : null
++            [
++                    id          : image.id,
++                    title       : image.title,
++                    storage     : [
++                            kind: image.storageKind == 'EMBEDDED' ? 'embedded' :
++                                    image.storageKind == 'ABSOLUTE_PATH' ? 'reference' : image.storageKind,
++                            path: image.storagePath
++                    ],
++                    source      : [
++                            path        : sourceMetadata.absolutePath,
++                            size        : sourceMetadata.fileSize,
++                            lastModified: sourceMetadata.modifiedTimeMillis
++                    ],
++                    dimensions  : image.dimensions,
++                    position    : [c: position.channel, z: position.slice, t: position.frame],
++                    display     : [
++                            composite    : displayState.composite ?: false,
++                            mode         : displayState.displayMode ?: 0,
++                            activeChannels: displayState.activeChannels ?: [],
++                            channelRanges: ranges
++                    ],
++                    window      : image.windowBounds,
++                    canvas      : canvas,
++                    unsavedChanges: false,
++                    currentRoi : image.roiPath,
++                    overlayRois: image.overlayPath ? [image.overlayPath] : []
++            ]
++        }
++        manifest
+     }
+ 
+     static void extract(Path archive, Path destination) {
+@@ -354,7 +417,21 @@
+             Overlay overlay = new Overlay()
+             overlayPaths.each { relative ->
+                 Path roiPath = resolveAsset(assetRoot, relative as String)
+-                if (Files.isRegularFile(roiPath)) overlay.add(loadRoi(roiPath))
++                if (Files.isRegularFile(roiPath)) {
++                    if (roiPath.toString().toLowerCase(Locale.ROOT).endsWith('.zip')) {
++                        new ZipFile(roiPath.toFile(), StandardCharsets.UTF_8).withCloseable { zip ->
++                            zip.entries().each { entry ->
++                                if (!entry.directory && entry.name.toLowerCase(Locale.ROOT).endsWith('.roi')) {
++                                    zip.getInputStream(entry).withCloseable { input ->
++                                        overlay.add(new RoiDecoder(input.bytes, entry.name).getRoi())
++                                    }
++                                }
++                            }
++                        }
++                    } else {
++                        overlay.add(loadRoi(roiPath))
++                    }
++                }
+             }
+             imp.setOverlay(overlay)
+         }
+@@ -366,7 +443,8 @@
+             if (state.canvas && imp.getCanvas() != null) {
+                 Map canvasState = (Map) state.canvas
+                 imp.getCanvas().setMagnification(asDouble(canvasState.magnification))
+-                imp.getCanvas().setSourceRect(mapRectangle((Map) canvasState.sourceRect))
++                if (canvasState.sourceRect)
++                    imp.getCanvas().setSourceRect(mapRectangle((Map) canvasState.sourceRect))
+             }
+             imp.updateAndDraw()
+         }
+@@ -866,7 +944,11 @@
+         OpenDialog openDialog = new OpenDialog('打开 Snapshot', null)
+         String selected = openDialog.getPath()
+         if (!selected) return
+-        Path source = new File(selected).toPath().toAbsolutePath().normalize()
++        restoreSnapshotArchive(new File(selected).toPath(), true)
++    }
++
++    static void restoreSnapshotArchive(Path archive, boolean showSummary) {
++        Path source = archive.toAbsolutePath().normalize()
+         IJ.log('')
+         IJ.log('=== Snapshot 恢复开始 ===')
+         IJ.log("快照包：${source}")
+@@ -913,7 +995,8 @@
+         if (archiveToRestore != source) summary.append("\n\n修复后的快照：\n${archiveToRestore}")
+         IJ.log("=== Snapshot 恢复完成：成功 ${result.images.size()}，跳过 ${skipped.size()}，" +
+                 "失败 ${result.errors.size()} ===")
+-        IJ.showMessage('Snapshot：恢复完成', summary.toString())
++        if (showSummary) IJ.showMessage('Snapshot：恢复完成', summary.toString())
++        else IJ.showStatus("Snapshot: restored ${result.images.size()} images, failed ${result.errors.size()}")
+     }
+ 
+     private static Map repairReferencedPaths(List<Map> issues, Map manifest) {
+@@ -1008,8 +1091,15 @@
+ 
+ if (!Boolean.getBoolean('snapshot.testMode')) {
+     try {
++        if (binding.hasVariable('snapshotDropPath')) {
++            Path archive = new File(snapshotDropPath as String).toPath()
++            if (!SnapshotArchive.isSnapshot(archive)) return false
++            SnapshotApp.restoreSnapshotArchive(archive, false)
++            return true
++        }
+         SnapshotApp.run()
+     } catch (Throwable error) {
+         IJ.handleException(error)
++        if (binding.hasVariable('snapshotDropPath')) return true
+     }
+ }

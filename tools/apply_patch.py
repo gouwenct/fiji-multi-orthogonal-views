@@ -10,7 +10,11 @@ from pathlib import Path
 
 
 BASE_SHA256 = "2e1a09961dfb41cee66ddc821b2577a41a072566ce45a49bae69267099741e20"
-TARGET_ENTRY = "ij/plugin/Orthogonal_Views.class"
+SUPPORTED_SHA256 = {
+    BASE_SHA256,
+    "15c18090a560e7be334445f6e4f3335efc0fcd1b491f8325ba8402562c95feaf",  # v0.1.0
+}
+PATCH_ENTRIES = ("ij/plugin/Orthogonal_Views.class", "ij/plugin/DragAndDrop.class")
 
 
 def sha256(path: Path) -> str:
@@ -27,46 +31,82 @@ def main() -> int:
         return 2
 
     jar = Path(sys.argv[1]).expanduser().resolve()
-    class_file = Path(__file__).resolve().parents[1] / "patch" / TARGET_ENTRY
-    if not jar.is_file() or not class_file.is_file():
-        print("missing JAR or patch class", file=sys.stderr)
+    if jar.name.lower() != "ij-1.54p.jar" or jar.parent.name.lower() != "jars":
+        print("expected a Fiji jars/ij-1.54p.jar target", file=sys.stderr)
+        return 2
+    project_root = Path(__file__).resolve().parents[1]
+    patch_root = project_root / "patch"
+    snapshot_source = project_root / "src" / "Snapshot_.groovy"
+    snapshot = jar.parent.parent / "scripts" / "Plugins" / "Snapshot_.groovy"
+    class_files = {
+        entry: patch_root / entry
+        for entry in PATCH_ENTRIES
+    }
+    if not jar.is_file() or not snapshot_source.is_file() or not all(path.is_file() for path in class_files.values()):
+        print("missing JAR, patch class or Snapshot source", file=sys.stderr)
         return 2
 
     actual = sha256(jar)
-    if actual.lower() != BASE_SHA256:
-        print(f"base JAR hash mismatch: {actual}", file=sys.stderr)
-        print(f"expected: {BASE_SHA256}", file=sys.stderr)
+    if actual.lower() not in SUPPORTED_SHA256:
+        print(f"unsupported JAR hash: {actual}", file=sys.stderr)
+        print("expected stock ij-1.54p.jar or the v0.1.0 release; see PATCH.md", file=sys.stderr)
         return 1
 
-    backup = jar.with_name(jar.name + ".original")
-    if backup.exists():
-        print(f"backup already exists: {backup}", file=sys.stderr)
-        return 1
-    shutil.copy2(jar, backup)
+    backup = jar.with_name(jar.name + ".before-v0.2.0")
+    snapshot_backup = snapshot.with_name(snapshot.name + ".before-v0.2.0")
+    had_snapshot = snapshot.is_file()
+    for original, saved in ((jar, backup), (snapshot, snapshot_backup)):
+        if saved.exists() and (not original.is_file() or sha256(saved) != sha256(original)):
+            print(f"backup differs from current file: {saved}", file=sys.stderr)
+            return 1
 
     descriptor, temporary_name = tempfile.mkstemp(prefix=jar.name + ".", suffix=".tmp", dir=jar.parent)
     os.close(descriptor)
     temporary = Path(temporary_name)
+    snapshot_temporary = None
+    snapshot_installed = False
     try:
         with zipfile.ZipFile(jar, "r") as source, zipfile.ZipFile(temporary, "w") as target:
-            found = False
+            found = set()
             for info in source.infolist():
                 data = source.read(info.filename)
-                if info.filename == TARGET_ENTRY:
-                    data = class_file.read_bytes()
-                    found = True
+                if info.filename in class_files:
+                    data = class_files[info.filename].read_bytes()
+                    found.add(info.filename)
                     info.compress_type = zipfile.ZIP_DEFLATED
                 target.writestr(info, data)
-            if not found:
-                raise RuntimeError(f"missing {TARGET_ENTRY} in {jar}")
+            missing = set(class_files) - found
+            if missing:
+                raise RuntimeError(f"missing {', '.join(sorted(missing))} in {jar}")
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix="Snapshot_", suffix=".tmp", dir=snapshot.parent)
+        os.close(descriptor)
+        snapshot_temporary = Path(temporary_name)
+        shutil.copyfile(snapshot_source, snapshot_temporary)
+        if not backup.exists():
+            shutil.copy2(jar, backup)
+        if had_snapshot and not snapshot_backup.exists():
+            shutil.copy2(snapshot, snapshot_backup)
+        snapshot_temporary.replace(snapshot)
+        snapshot_installed = True
         temporary.replace(jar)
     except Exception:
-        temporary.unlink(missing_ok=True)
-        backup.replace(jar)
+        if snapshot_installed:
+            if had_snapshot:
+                shutil.copy2(snapshot_backup, snapshot)
+            else:
+                snapshot.unlink()
         raise
+    finally:
+        temporary.unlink(missing_ok=True)
+        if snapshot_temporary is not None:
+            snapshot_temporary.unlink(missing_ok=True)
 
     print(f"patched: {jar}")
     print(f"backup:  {backup}")
+    print(f"snapshot: {snapshot}")
+    if had_snapshot:
+        print(f"snapshot backup: {snapshot_backup}")
     print(f"sha256:  {sha256(jar)}")
     return 0
 

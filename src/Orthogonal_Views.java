@@ -8,6 +8,7 @@ import java.awt.image.*;
 import java.awt.event.*;
 import java.awt.geom.*;
 import java.util.*;
+import java.lang.reflect.Field;
  
 /**
  * This plugin projects dynamically orthogonal XZ and YZ views of a stack. 
@@ -52,6 +53,8 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 	private boolean done;
 	private boolean initialized;
 	private boolean sliceSet;
+	private boolean updatePending;
+	private long lastDrag;
 	private Thread thread;
 	final static String CROSS = "|OV|";
 
@@ -148,6 +151,59 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 			if (instances.get(imp)==this)
 				instance = this;
 		}
+	}
+
+	private static void broadcastCrossLoc(Orthogonal_Views source) {
+		// shortcut: copy pixel coordinates; use matched image geometry for exact registration.
+		if (source==null || source.done || source.crossLoc==null)
+			return;
+		int x = source.crossLoc.x;
+		int y = source.crossLoc.y;
+		int z = source.imp.getSlice()-1;
+		Orthogonal_Views[] targets;
+		synchronized (instances) {
+			targets = instances.values().toArray(new Orthogonal_Views[instances.size()]);
+		}
+		for (java.awt.Window window : java.awt.Window.getWindows()) {
+			if (!window.isDisplayable() || !"Sync_Windows".equals(window.getClass().getName()))
+				continue;
+			try {
+				Field field = window.getClass().getDeclaredField("vwins");
+				field.setAccessible(true);
+				Vector selected = (Vector)field.get(window);
+				if (selected==null || !selected.contains(Integer.valueOf(source.imp.getID())))
+					continue;
+				field = window.getClass().getDeclaredField("cCursor");
+				field.setAccessible(true);
+				if (!((Checkbox)field.get(window)).getState())
+					continue;
+				field = window.getClass().getDeclaredField("cSlice");
+				field.setAccessible(true);
+				boolean syncSlice = ((Checkbox)field.get(window)).getState();
+				for (Orthogonal_Views target : targets) {
+					if (target!=null && target!=source && !target.done && target.crossLoc!=null &&
+							selected.contains(Integer.valueOf(target.imp.getID())))
+						target.applySynchronizedCrossLoc(x, y, syncSlice?z:target.imp.getSlice()-1);
+				}
+			} catch (ReflectiveOperationException ignored) {
+				// Sync_Win is optional; unsupported versions keep independent orthogonal views.
+			}
+		}
+	}
+
+	private void applySynchronizedCrossLoc(int x, int y, int z) {
+		if (done)
+			return;
+		crossLoc.setLocation(Math.max(0, Math.min(imp.getWidth()-1, x)),
+			Math.max(0, Math.min(imp.getHeight()-1, y)));
+		int slice = Math.max(1, Math.min(imp.getNSlices(), z+1));
+		if (slice!=imp.getSlice()) {
+			if (hyperstack)
+				imp.setPosition(imp.getChannel(), slice, imp.getFrame());
+			else
+				imp.setSlice(slice);
+		}
+		update();
 	}
 	
 	private ImageStack getStack() {
@@ -630,7 +686,9 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 			}
 		}
 		xz_image.changes = false;
-		xz_image.close();
+		// Close All owns window disposal; avoid closing the same window from two threads.
+		if (!Prefs.closingAll)
+			xz_image.close();
 		yz_image.setOverlay(null);
 		ImageWindow win2 = yz_image.getWindow();
 		if (win2!=null) {
@@ -644,7 +702,8 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 			}
 		}
 		yz_image.changes = false;
-		yz_image.close();
+		if (!Prefs.closingAll)
+			yz_image.close();
 		ImagePlus.removeImageListener(this);
 		Executer.removeCommandListener(this);
 		win.removeWindowListener(this);
@@ -676,6 +735,10 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 	public void mouseDragged(MouseEvent e) {
 		if (IJ.spaceBarDown())  // scrolling?
 			return;
+		long now = System.nanoTime();
+		if (e.getID()==MouseEvent.MOUSE_DRAGGED && now-lastDrag<33000000L)
+			return;
+		lastDrag = now;
 		if (e.getSource().equals(canvas)) {
 			crossLoc = canvas.getCursorLoc();
 		} else if (e.getSource().equals(xz_image.getCanvas())) {
@@ -704,9 +767,11 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 				imp.setSlice(slice);
 		}
 		update();
+		broadcastCrossLoc(this);
 	}
 
 	public void mouseReleased(MouseEvent e) {
+		mouseDragged(e); // Always apply the final position, including a throttled drag.
 		ImageCanvas ic = imp.getCanvas();
 		Rectangle srcRect = ic.getSrcRect();
 		if (srcRect.x!=startingSrcRect.x || srcRect.y!=startingSrcRect.y) {
@@ -742,6 +807,7 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 	
 	/** Refresh the output windows. */
 	synchronized void update() {
+		updatePending = true;
 		notify();
 	}
 	
@@ -774,6 +840,7 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 		if (p.x>=width) p.x=width-1;
 		if (p.x<0) p.x=0;
 		if (p.y<0) p.y=0;
+		p = new Point(p);
 		updateViews(p, is);
 		GeneralPath path = new GeneralPath();
 		drawCross(imp, p, path);
@@ -849,6 +916,7 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 				default: return;
 			}
 			update();
+			broadcastCrossLoc(this);
 		}
 	}
 
@@ -862,6 +930,17 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 	}
 
 	public void imageClosed(ImagePlus imp) {
+		// Sync Windows replaces the source StackWindow but keeps the image and canvas.
+		if (!done && imp==this.imp && imp.getWindow()!=null && imp.getWindow()!=win) {
+			win.removeWindowListener(this);
+			win.removeMouseWheelListener(this);
+			win.removeFocusListener(this);
+			win = imp.getWindow();
+			win.addWindowListener(this);
+			win.addMouseWheelListener(this);
+			win.addFocusListener(this);
+			return;
+		}
 		if (!done && (imp==this.imp || imp==xz_image || imp==yz_image))
 			dispose();
 	}
@@ -950,6 +1029,7 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 			crossLoc.x += e.getWheelRotation();
 		}
 		update();
+		broadcastCrossLoc(this);
 	}
 
 	public void focusGained(FocusEvent e) {
@@ -1033,15 +1113,9 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 	}
 	
 	public void setCrossLoc(int x, int y, int z) {
-		crossLoc.setLocation(x, y);
-		int slice = z+1;
-		if (slice!=imp.getSlice()) {
-			if (hyperstack)
-				imp.setPosition(imp.getChannel(), slice, imp.getFrame());
-			else
-				imp.setSlice(slice);
-			sliceSet = true;
-		}
+		applySynchronizedCrossLoc(x, y, z);
+		sliceSet = true;
+		broadcastCrossLoc(this);
 		while (!initialized) {
 			IJ.wait(10);
 		}
@@ -1057,13 +1131,27 @@ public class Orthogonal_Views implements PlugIn, MouseListener, MouseMotionListe
 	}
 	
 	public void run() {
-		while (!done) {
+		long nextUpdate = 0;
+		while (true) {
 			synchronized(this) {
-				try {wait();}
-				catch(InterruptedException e) {}
+				while (!done) {
+					long delay = nextUpdate-System.nanoTime();
+					if (updatePending && delay<=0)
+						break;
+					try {
+						if (updatePending)
+							wait(delay/1000000+1);
+						else
+							wait();
+					} catch (InterruptedException e) {}
+				}
+				if (done)
+					return;
+				updatePending = false;
 			}
-			if (!done)
-				exec();
+			// Coalesce rapid input at about 30 fps; keep requests received during drawing.
+			nextUpdate = System.nanoTime()+33000000L;
+			exec();
 		}
 	}
 
