@@ -2,13 +2,26 @@
 
 上级索引：[README.md](README.md)。
 
-本说明对应 v0.2.0 Fiji 中的 `Plugins > Snapshot`。快照文件是 `.zip`，用于保存一批图像及其显示状态。它不是单张 TIFF 的替代格式。
+本说明适用于 Snapshot 独立插件和 v0.2.0 Fiji 中的 `Plugins > Snapshot`。快照文件是 `.zip`，用于保存一批图像及其显示状态。它不是单张 TIFF 的替代格式。
 
 v0.2.0 支持拖放：把包含根目录 `snapshot.json` 的 Snapshot `.zip` 拖到 ImageJ 主窗口、工具栏或状态栏，会直接恢复整批图像。普通 ZIP 不会被误认为 Snapshot；拖放入口支持 v1 和 v2。
 
 当前约定固定使用 ZIP 根目录的 `snapshot.json` 作为识别标记和恢复清单。用户不需要手动打开或编辑它；后续批量代码只需按本文档生成该文件和对应的 TIFF 资源即可。
 
 完整包保留了两个同名入口：简易的“保存快照 / 恢复快照”对话框来自 `scripts/Plugins/Snapshot_.groovy`，常驻面板来自 `plugins/Snapshot.jar`。两者的文件格式不同。简易入口支持 v1 和 v2 读取；常驻面板使用 v2。补丁包安装简易入口，常驻面板是否存在取决于原 Fiji 环境。
+
+## 独立插件安装
+
+下载 [Snapshot 独立插件包](https://github.com/gouwenct/fiji-multi-orthogonal-views/releases/download/snapshot-v0.1.0/Snapshot-standalone-v0.1.0.zip)，或直接下载 [Snapshot.jar](https://github.com/gouwenct/fiji-multi-orthogonal-views/releases/download/snapshot-v0.1.0/Snapshot.jar)。发行页提供 `SNAPSHOT-SHA256SUMS.txt` 校验值。
+
+1. 保存图像并关闭 Fiji。
+2. 若已有 `Snapshot.jar` 或 `Snapshot2.jar`，先把旧文件移到 Fiji 目录外备份。两个名称对应的当前 JAR 内容相同，保留一份即可。
+3. 将下载的 `Snapshot.jar` 复制到 `Fiji.app/plugins/`。
+4. 重新启动 Fiji，打开 `Plugins > Snapshot`，使用常驻面板保存、导入和恢复快照。
+
+运行依赖为 ImageJ 1.x、Gson 和 Java 8 或更高版本；已验证 ImageJ 1.54p、Gson 2.10.1 和 Java 8。独立包不包含这些依赖库，适合安装到已有 Fiji 中。
+
+独立 JAR 通过面板导入 v2 快照。把 ZIP 拖到 ImageJ 主窗口自动恢复，需要本项目 v0.2.0 完整包或 [核心补丁](PATCH.md#安装与升级)。独立包的 `src/Snapshot_.groovy` 是可选的 v1/v2 兼容脚本；需要简易入口时，将它复制到 `Fiji.app/scripts/Plugins/` 后重启。
 
 ## 保存一批图像
 
@@ -80,3 +93,13 @@ v0.2.0 支持拖放：把包含根目录 `snapshot.json` 的 Snapshot `.zip` 拖
 ```
 
 `D:\data\snapshots` 为示例数据目录，可省略最后一个参数，只测试生成的夹具。此前还验证了 5 个实际 ZIP，共 35 张图像：实际恢复后，尺寸、C/Z/T、显示范围与 manifest 一致；输入 ZIP 的 SHA-256 未变。测试还覆盖 v1、v2、ROI、路径修复后另存和拒绝未知版本。
+
+## 独立面板 JAR 与源码
+
+仓库中的 [plugins/Snapshot.jar](plugins/Snapshot.jar) 是常驻面板编译包，与 Fiji v0.2.0 完整包中的 JAR 相同。独立发行标签为 `snapshot-v0.1.0`；JAR 内部 Maven 版本仍为 `0.1.0-SNAPSHOT`，本次分发没有重新编译或修改面板功能。
+
+JAR SHA-256：`3E88F67DF3558AA226533BE93A3B4848F1E97988DAD49833D3B56149D4EDB02B`。
+
+常驻面板的完整 Java 工程源码目前不在此仓库。[src/Snapshot_.groovy](src/Snapshot_.groovy) 是简易入口的独立实现，不能用于重新编译面板 JAR。
+
+回归测试：[SnapshotPluginTest.groovy](tests/SnapshotPluginTest.groovy)。使用未打核心补丁的 ImageJ 1.54p，验证插件入口类加载、两张嵌入 TIFF 的保存与恢复、全部像素、Z 位置、显示范围和 ROI，以及兼容脚本恢复插件生成的 v2 快照；输入 ZIP 保持不变。测试在 Windows、Java 8 和 Gson 2.10.1 环境通过，未验证其他操作系统。

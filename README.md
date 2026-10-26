@@ -16,6 +16,8 @@
 
 Fiji 副本中的 `Plugins > Snapshot` 可以把多张 TIFF 的图像状态保存成一个 `.zip`，之后一次恢复整批图像。具体操作和后续批量结果的生成约定见 [SNAPSHOT.md](SNAPSHOT.md)。
 
+**[下载独立 Snapshot 插件包](https://github.com/gouwenct/fiji-multi-orthogonal-views/releases/download/snapshot-v0.1.0/Snapshot-standalone-v0.1.0.zip)**，或直接下载 [Snapshot.jar](https://github.com/gouwenct/fiji-multi-orthogonal-views/releases/download/snapshot-v0.1.0/Snapshot.jar)。将 JAR 放入 `Fiji.app/plugins/`，重启后使用 `Plugins > Snapshot` 常驻面板。依赖、旧版替换和拖放功能的区别见 [独立插件安装](SNAPSHOT.md#独立插件安装)。
+
 ### 2. 为现有 Fiji 安装补丁（可选）
 
 需要保留现有 Fiji 环境时，可[下载补丁包](https://github.com/gouwenct/fiji-multi-orthogonal-views/releases/download/v0.2.0/fiji-multi-orthogonal-views-patch-v0.2.0.zip)。解压后保存图像并关闭 Fiji，在补丁目录运行：
